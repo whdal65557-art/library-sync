@@ -1,0 +1,19 @@
+name: 접속 테스트 (도서관 사이트)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 덕계도서관 로그인 화면 접속 확인
+        run: |
+          URL="https://www.libyj.go.kr/dklib/menu/10543/program/30003/memberLogin.do"
+          CODE=$(curl -s -m 30 -o page.html -w "%{http_code}" -A "Mozilla/5.0" "$URL" || true)
+          echo "HTTP 상태 코드: $CODE"
+          if grep -q "통합로그인" page.html 2>/dev/null; then
+            echo "결과: 로그인 화면을 불러왔어요 (접속 가능)"
+          else
+            echo "결과: 로그인 화면을 못 불러왔어요 (해외 IP 차단 가능성)"
+          fi
