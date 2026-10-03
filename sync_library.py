@@ -10,6 +10,7 @@ import os
 import re
 import sys
 import time
+from datetime import date
 
 import requests
 from bs4 import BeautifulSoup
@@ -211,45 +212,77 @@ def read_loan_pages(raw, title_prop):
 
 
 # ---------- 비교 계획 ----------
+def days_apart(a, b):
+    if not a or not b:
+        return None
+    return abs((date.fromisoformat(a) - date.fromisoformat(b)).days)
+
+
+def pick_page(ln, pages, used):
+    """같은 책의 기존 기록을 고른다. (페이지, 종류) 반환.
+    종류: same(같은 대출) / fix(날짜가 며칠 어긋난 직접 입력) / convert(예약->대출) / reuse(재대출)
+    """
+    cands = [p for p in pages if p["id"] not in used and title_match(ln["title"], p["title"])]
+    if not cands:
+        return None, None
+    for p in cands:
+        if p["start"] == ln["start"]:
+            return p, "same"
+    near = [
+        p for p in cands
+        if p["status"] in S_ACTIVE and days_apart(p["start"], ln["start"]) is not None and days_apart(p["start"], ln["start"]) <= 3
+    ]
+    if near:
+        return min(near, key=lambda p: days_apart(p["start"], ln["start"])), "fix"
+    reserved = [p for p in cands if p["status"] in S_RESERVED]
+    if reserved:
+        return reserved[0], "convert"
+    returned = [p for p in cands if p["status"] == S_RETURNED]
+    if returned:
+        return max(returned, key=lambda p: p["start"] or ""), "reuse"
+    active = [p for p in cands if p["status"] in S_ACTIVE]
+    if active:
+        return max(active, key=lambda p: p["start"] or ""), "reuse"
+    return None, None
+
+
 def make_plan(loans, pages, lib_by_key, scope_ids):
     used, plan = set(), []
-    stats = {"create": 0, "update": 0, "convert": 0, "return": 0, "same": 0}
+    stats = {"create": 0, "convert": 0, "reuse": 0, "fix": 0, "return": 0, "same": 0}
 
     for ln in loans:
         lib_id = lib_by_key.get(lib_key(ln["library"]))
-        match = next(
-            (p for p in pages if p["id"] not in used and p["start"] == ln["start"] and title_match(ln["title"], p["title"])),
-            None,
-        )
-        if match:
-            used.add(match["id"])
-            props = {}
-            if match["end"] != ln["end"]:
-                props["period"] = (ln["start"], ln["end"])
-            if lib_id and not match["libs"]:
-                props["lib"] = lib_id
-            if props:
-                plan.append(("update", match["id"], props))
-                stats["update"] += 1
-            else:
-                stats["same"] += 1
+        page, kind = pick_page(ln, pages, used)
+
+        if page is None:
+            plan.append(("create", None, {"title": ln["title"], "status": S_LOANING, "period": (ln["start"], ln["end"]), "lib": lib_id}))
+            stats["create"] += 1
             continue
 
-        reserved = next(
-            (p for p in pages if p["id"] not in used and p["status"] in S_RESERVED and title_match(ln["title"], p["title"])),
-            None,
-        )
-        if reserved:
-            used.add(reserved["id"])
+        used.add(page["id"])
+        if kind == "same":
+            props = {}
+            if page["end"] != ln["end"]:
+                props["period"] = (ln["start"], ln["end"])
+            if lib_id and not page["libs"]:
+                props["lib"] = lib_id
+            if props:
+                plan.append(("update", page["id"], props))
+                stats["fix"] += 1
+            else:
+                stats["same"] += 1
+        elif kind == "fix":
+            props = {"period": (ln["start"], ln["end"])}
+            if lib_id and not page["libs"]:
+                props["lib"] = lib_id
+            plan.append(("update", page["id"], props))
+            stats["fix"] += 1
+        else:  # convert / reuse: 대출중으로 바꾸고 기간과 도서관을 새 대출에 맞춘다
             props = {"status": S_LOANING, "period": (ln["start"], ln["end"])}
             if lib_id:
                 props["lib"] = lib_id
-            plan.append(("update", reserved["id"], props))
-            stats["convert"] += 1
-            continue
-
-        plan.append(("create", None, {"title": ln["title"], "status": S_LOANING, "period": (ln["start"], ln["end"]), "lib": lib_id}))
-        stats["create"] += 1
+            plan.append(("update", page["id"], props))
+            stats[kind] += 1
 
     for p in pages:
         if p["id"] in used or p["status"] not in S_ACTIVE or not p["libs"]:
@@ -356,7 +389,10 @@ def main():
 
     pages = read_loan_pages(n.query_all(LOAN_DB), title_prop)
     plan, st = make_plan(loans, pages, lib_by_key, scope_ids)
-    print(f"계획: 새로 만듦 {st['create']}, 예약→대출중 {st['convert']}, 날짜/도서관 갱신 {st['update']}, 반납완료 {st['return']}, 변경 없음 {st['same']}")
+    print(
+        f"계획: 새로 만듦 {st['create']}, 예약→대출중 {st['convert']}, 기존 기록 재사용(반납완료 등→대출중) {st['reuse']}, "
+        f"날짜/도서관 갱신 {st['fix']}, 반납완료 {st['return']}, 변경 없음 {st['same']}"
+    )
 
     if dry:
         print("DRY_RUN: 노션에 아무것도 쓰지 않았습니다")
