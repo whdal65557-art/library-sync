@@ -275,6 +275,55 @@ def build_props(props, schema, title_prop):
     return out
 
 
+# ---------- 진단 (404일 때만 실행) ----------
+def diagnose(n, ids):
+    """어떤 DB가 보이는지 알려준다. 책 제목은 출력하지 않는다."""
+    print("--- 진단 시작 ---")
+    try:
+        me = n.call("GET", "/users/me")
+        ws = (me.get("bot") or {}).get("workspace_name")
+        print(f"토큰 확인: 정상 (연결된 워크스페이스: {ws})")
+    except RuntimeError as e:
+        print(f"토큰 확인: 실패 -> {e} (NOTION_TOKEN 값을 다시 확인하세요)")
+        return
+
+    try:
+        res = n.call("POST", "/search", json={"filter": {"property": "object", "value": "database"}, "page_size": 100})
+        found = res.get("results", [])
+        print(f"이 연결이 볼 수 있는 DB: {len(found)}개")
+        for d in found:
+            title = plain(d.get("title", []))[:30]
+            print(f"  - {d['id'].replace('-', '')}  ({title})")
+    except RuntimeError as e:
+        print(f"DB 목록 조회 실패 -> {e}")
+
+    for name, db in ids.items():
+        print(f"[{name}] 설정된 ID: {db}")
+        try:
+            n.call("GET", f"/pages/{db}")
+        except RuntimeError:
+            continue
+        print(f"  -> 이 ID는 DB가 아니라 '페이지'입니다. 그 안의 DB를 찾습니다.")
+        try:
+            kids = n.call("GET", f"/blocks/{db}/children?page_size=100").get("results", [])
+            for k in kids:
+                if k.get("type") == "child_database":
+                    print(f"  -> 안에 있는 DB: {k['id'].replace('-', '')} ({k['child_database'].get('title', '')[:30]})")
+        except RuntimeError as e:
+            print(f"  -> 페이지 안을 읽지 못했습니다: {e}")
+    print("--- 진단 끝 ---")
+    print("위 '볼 수 있는 DB' 목록에 대출 기록/도서관 DB의 ID가 없으면, 그 DB에 연결이 추가되지 않은 것입니다.")
+
+
+def get_schema(n, db):
+    try:
+        return n.schema(db)
+    except RuntimeError as e:
+        if "404" in str(e):
+            diagnose(n, {"대출 기록 DB": LOAN_DB, "도서관 DB": LIB_DB})
+        raise
+
+
 # ---------- 실행 ----------
 def main():
     dry = os.environ.get("DRY_RUN", "true").lower() == "true"
@@ -286,12 +335,12 @@ def main():
     print(f"도서관 대출 {len(loans)}건 확인")
 
     n = Notion(token)
-    loan_schema = n.schema(LOAN_DB)
+    loan_schema = get_schema(n, LOAN_DB)
     for name in (P_STATUS, P_PERIOD, P_LIB):
         if name not in loan_schema:
             raise RuntimeError(f"대출 기록 DB에 '{name}' 속성이 없습니다")
     title_prop = next(k for k, v in loan_schema.items() if v["type"] == "title")
-    lib_title_prop = next(k for k, v in n.schema(LIB_DB).items() if v["type"] == "title")
+    lib_title_prop = next(k for k, v in get_schema(n, LIB_DB).items() if v["type"] == "title")
 
     lib_by_key = {}
     for p in n.query_all(LIB_DB):
