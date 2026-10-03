@@ -255,7 +255,7 @@ def make_plan(loans, pages, lib_by_key, scope_ids):
         page, kind = pick_page(ln, pages, used)
 
         if page is None:
-            plan.append(("create", None, {"title": ln["title"], "status": S_LOANING, "period": (ln["start"], ln["end"]), "lib": lib_id}))
+            plan.append(("create", None, {"title": ln["title"], "status": S_LOANING, "period": (ln["start"], ln["end"]), "lib": lib_id}, {"type": "create", "site": ln["title"]}))
             stats["create"] += 1
             continue
 
@@ -267,7 +267,7 @@ def make_plan(loans, pages, lib_by_key, scope_ids):
             if lib_id and not page["libs"]:
                 props["lib"] = lib_id
             if props:
-                plan.append(("update", page["id"], props))
+                plan.append(("update", page["id"], props, {"type": kind, "site": ln["title"], "notion": page["title"], "old": (page["status"], page["start"], page["end"]), "new": props.get("period")}))
                 stats["fix"] += 1
             else:
                 stats["same"] += 1
@@ -275,20 +275,20 @@ def make_plan(loans, pages, lib_by_key, scope_ids):
             props = {"period": (ln["start"], ln["end"])}
             if lib_id and not page["libs"]:
                 props["lib"] = lib_id
-            plan.append(("update", page["id"], props))
+            plan.append(("update", page["id"], props, {"type": kind, "site": ln["title"], "notion": page["title"], "old": (page["status"], page["start"], page["end"]), "new": props.get("period")}))
             stats["fix"] += 1
         else:  # convert / reuse: 대출중으로 바꾸고 기간과 도서관을 새 대출에 맞춘다
             props = {"status": S_LOANING, "period": (ln["start"], ln["end"])}
             if lib_id:
                 props["lib"] = lib_id
-            plan.append(("update", page["id"], props))
+            plan.append(("update", page["id"], props, {"type": kind, "site": ln["title"], "notion": page["title"], "old": (page["status"], page["start"], page["end"]), "new": props.get("period")}))
             stats[kind] += 1
 
     for p in pages:
         if p["id"] in used or p["status"] not in S_ACTIVE or not p["libs"]:
             continue
         if all(l in scope_ids for l in p["libs"]):
-            plan.append(("update", p["id"], {"status": S_RETURNED}))
+            plan.append(("update", p["id"], {"status": S_RETURNED}, {"type": "return", "notion": p["title"], "old": (p["status"], p["start"], p["end"]), "new": None}))
             stats["return"] += 1
     return plan, stats
 
@@ -360,6 +360,7 @@ def get_schema(n, db):
 # ---------- 실행 ----------
 def main():
     dry = os.environ.get("DRY_RUN", "true").lower() == "true"
+    print("모드: " + ("확인만 (DRY_RUN, 노션에 쓰지 않음)" if dry else "실제 반영"))
     uid, pw, token = os.environ["LIBRARY_ID"], os.environ["LIBRARY_PW"], os.environ["NOTION_TOKEN"]
 
     with requests.Session() as s:
@@ -395,9 +396,13 @@ def main():
     )
 
     if dry:
+        if os.environ.get("SHOW_TITLES", "false").lower() == "true":
+            mask = lambda t: (t or "")[:3] + "…"
+            for _k, _id, _props, m in plan:
+                print(f"  [{m['type']}] 사이트 {mask(m.get('site'))} / 노션 {mask(m.get('notion'))} / 기존 {m.get('old')} -> {m.get('new')}")
         print("DRY_RUN: 노션에 아무것도 쓰지 않았습니다")
         return
-    for kind, page_id, props in plan:
+    for kind, page_id, props, _meta in plan:
         body = build_props(props, loan_schema, title_prop)
         if kind == "create":
             n.call("POST", "/pages", json={"parent": {"database_id": LOAN_DB}, "properties": body})
