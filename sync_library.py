@@ -67,7 +67,13 @@ def title_match(site_title, notion_title):
     if full_key(notion_title) and full_key(notion_title) == full_key(site_title):
         return True
     short, long_ = (a, b) if len(a) <= len(b) else (b, a)
-    return len(short) >= 4 and long_.startswith(short)
+    if len(short) >= 4 and long_.startswith(short):
+        return True
+    # 노션에 짧게 적은 제목이 사이트의 긴 제목(앞 괄호·부제 포함) 안에 들어 있는 경우
+    site_full, notion_full = full_key(site_title), full_key(notion_title)
+    if len(b) >= 4 and b in site_full:
+        return True
+    return len(a) >= 4 and a in notion_full
 
 
 def lib_key(s):
