@@ -21,7 +21,7 @@ LOGIN_PROC = BASE + "/dklib/menu/10543/program/30003/memberLoginProc.do"
 LOAN_PATH = "/dklib/menu/10531/program/30026/mypage/loanStatusList.do"
 LOAN_URL = BASE + LOAN_PATH
 
-LOAN_DB = "1c6edb47440280a2b04bdffb278aa7b2"
+LOAN_DB = "1c6edb47440280de8157e7915a0cbb68"
 LIB_DB = "1c4edb4744028051a183c54632991fb6"
 
 P_STATUS = "상태"
