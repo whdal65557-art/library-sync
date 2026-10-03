@@ -1,0 +1,53 @@
+name: 도서관 대출 동기화
+
+on:
+  schedule:
+    # 도서관 이용 시간대(한국 09:00~22:59)에 30분마다. GitHub는 UTC 기준이고, 밀릴 수 있어요.
+    - cron: "7,37 0-13 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "노션에 쓰지 않고 건수만 확인 (true/false)"
+        type: boolean
+        default: true
+
+concurrency:
+  group: library-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install requests beautifulsoup4
+
+      - name: 동기화
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          LIBRARY_ID: ${{ secrets.LIBRARY_ID }}
+          LIBRARY_PW: ${{ secrets.LIBRARY_PW }}
+          # 수동 실행은 입력값을 따르고, 자동 실행은 저장소 변수 LIVE=1 일 때만 실제로 씁니다.
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || vars.LIVE != '1' }}
+        run: python sync_library.py
+
+      # 공개 저장소는 60일간 활동이 없으면 예약 실행이 멈추므로, 50일이 지나면 빈 커밋을 남겨요.
+      - name: 예약 실행 유지
+        if: github.event_name == 'schedule'
+        run: |
+          last=$(git log -1 --format=%ct)
+          if [ $(( $(date +%s) - last )) -gt $(( 50*24*3600 )) ]; then
+            git config user.name "github-actions"
+            git config user.email "actions@users.noreply.github.com"
+            git commit --allow-empty -m "keepalive"
+            git push
+          fi
