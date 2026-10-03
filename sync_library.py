@@ -210,7 +210,7 @@ def probe(url):
         print(f"  진단: 일반 접속도 실패 ({type(e).__name__}, {time.time() - t:.1f}초)")
 
 
-def goto_retry(page, url, tries=3, pending=None):
+def goto_retry(page, url, tries=2, pending=None):
     """페이지 열기만 재시도한다 (로그인 제출은 계정 잠김 방지를 위해 재시도하지 않는다)."""
     from urllib.parse import urlparse
 
@@ -222,7 +222,7 @@ def goto_retry(page, url, tries=3, pending=None):
             last = e
             hosts = sorted({urlparse(r.url).netloc for r in (pending or {})})
             print(f"  의정부 접속 재시도 {i + 1}/{tries}: {type(e).__name__} / 응답 대기 중이던 서버: {hosts}")
-            time.sleep(10)
+            time.sleep(30)
     probe(url)
     raise RuntimeError(f"의정부 사이트에 접속하지 못했습니다 ({tries}회 시도, {type(last).__name__})")
 
@@ -239,8 +239,18 @@ def open_login(page, pending):
                 body = norm_space(page.inner_text("body"))[:200]
             except Exception:
                 title, body = "?", "(읽지 못함)"
-            print(f"  진단 {i + 1}/3: 로그인 입력창 없음 / 응답 {getattr(resp, 'status', '?')} / 제목 {title!r} / 본문 {body!r}")
-            time.sleep(15)
+            extra = ""
+            try:
+                rh = resp.all_headers()
+                qh = resp.request.all_headers()
+                extra = (
+                    f" / 서버 {rh.get('server')!r} 경유 {rh.get('via')!r} 형식 {rh.get('content-type')!r}"
+                    f" / 보낸 헤더 이름 {sorted(qh)}"
+                )
+            except Exception:
+                pass
+            print(f"  진단 {i + 1}/3: 로그인 입력창 없음 / 응답 {getattr(resp, 'status', '?')} / 제목 {title!r} / 본문 {body[:60]!r}{extra}")
+            time.sleep(45)
     raise RuntimeError("의정부 로그인 화면이 정상으로 열리지 않았습니다")
 
 
@@ -250,18 +260,23 @@ def fetch_uijeongbu(uid, pw):
 
     loans, expected, seen, queue = [], None, set(), [1]
     with sync_playwright() as p:
-        browser = p.chromium.launch()
+        browser = p.chromium.launch(args=["--disable-blink-features=AutomationControlled"])
         try:
-            page = browser.new_context(locale="ko-KR").new_page()
+            ctx = browser.new_context(
+                locale="ko-KR",
+                timezone_id="Asia/Seoul",
+                user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ),
+                extra_http_headers={"Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8"},
+            )
+            page = ctx.new_page()
             page.set_default_timeout(40000)
             pending = {}
             page.on("request", lambda r: pending.__setitem__(r, time.time()))
             page.on("requestfinished", lambda r: pending.pop(r, None))
             page.on("requestfailed", lambda r: pending.pop(r, None))
-            page.route(
-                "**/*",
-                lambda route: route.abort() if route.request.resource_type in ("image", "media", "font") else route.continue_(),
-            )
             open_login(page, pending)
             page.fill("#member_id_tmp", uid)
             page.fill("#member_pw_tmp", pw)
