@@ -217,8 +217,7 @@ def goto_retry(page, url, tries=3, pending=None):
     last = None
     for i in range(tries):
         try:
-            page.goto(url, wait_until="domcontentloaded")
-            return
+            return page.goto(url, wait_until="domcontentloaded")
         except Exception as e:
             last = e
             hosts = sorted({urlparse(r.url).netloc for r in (pending or {})})
@@ -226,6 +225,23 @@ def goto_retry(page, url, tries=3, pending=None):
             time.sleep(10)
     probe(url)
     raise RuntimeError(f"의정부 사이트에 접속하지 못했습니다 ({tries}회 시도, {type(last).__name__})")
+
+
+def open_login(page, pending):
+    for i in range(3):
+        resp = goto_retry(page, UI_LOGIN, pending=pending)
+        try:
+            page.wait_for_selector("#member_id_tmp", timeout=20000)
+            return
+        except Exception:
+            try:
+                title = page.title()
+                body = norm_space(page.inner_text("body"))[:200]
+            except Exception:
+                title, body = "?", "(읽지 못함)"
+            print(f"  진단 {i + 1}/3: 로그인 입력창 없음 / 응답 {getattr(resp, 'status', '?')} / 제목 {title!r} / 본문 {body!r}")
+            time.sleep(15)
+    raise RuntimeError("의정부 로그인 화면이 정상으로 열리지 않았습니다")
 
 
 def fetch_uijeongbu(uid, pw):
@@ -246,7 +262,7 @@ def fetch_uijeongbu(uid, pw):
                 "**/*",
                 lambda route: route.abort() if route.request.resource_type in ("image", "media", "font") else route.continue_(),
             )
-            goto_retry(page, UI_LOGIN, pending=pending)
+            open_login(page, pending)
             page.fill("#member_id_tmp", uid)
             page.fill("#member_pw_tmp", pw)
             try:
