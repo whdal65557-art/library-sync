@@ -200,6 +200,20 @@ def parse_ui_loans(html):
     return items, expected, pages
 
 
+def goto_retry(page, url, tries=3):
+    """페이지 열기만 재시도한다 (로그인 제출은 계정 잠김 방지를 위해 재시도하지 않는다)."""
+    last = None
+    for i in range(tries):
+        try:
+            page.goto(url, wait_until="domcontentloaded")
+            return
+        except Exception as e:
+            last = e
+            print(f"  의정부 접속 재시도 {i + 1}/{tries}: {type(e).__name__}")
+            time.sleep(10)
+    raise RuntimeError(f"의정부 사이트에 접속하지 못했습니다 ({tries}회 시도, {type(last).__name__})")
+
+
 def fetch_uijeongbu(uid, pw):
     # 사이트가 아이디/비밀번호를 자바스크립트로 암호화해서 보내므로, 실제 브라우저로 사이트의 로그인 함수를 그대로 쓴다.
     from playwright.sync_api import sync_playwright
@@ -209,16 +223,23 @@ def fetch_uijeongbu(uid, pw):
         browser = p.chromium.launch()
         try:
             page = browser.new_context(locale="ko-KR").new_page()
-            page.set_default_timeout(45000)
-            page.goto(UI_LOGIN, wait_until="domcontentloaded")
+            page.set_default_timeout(60000)
+            page.route(
+                "**/*",
+                lambda route: route.abort() if route.request.resource_type in ("image", "media", "font") else route.continue_(),
+            )
+            goto_retry(page, UI_LOGIN)
             page.fill("#member_id_tmp", uid)
             page.fill("#member_pw_tmp", pw)
-            with page.expect_navigation(wait_until="domcontentloaded"):
-                page.evaluate("doLoginSubmit()")
+            try:
+                with page.expect_navigation(wait_until="domcontentloaded"):
+                    page.evaluate("doLoginSubmit()")
+            except Exception:
+                raise RuntimeError("의정부 로그인 응답이 없습니다 (아이디/비밀번호 또는 사이트 상태 확인)")
             while queue:
                 n_ = queue.pop(0)
                 seen.add(n_)
-                page.goto(f"{UI_LOAN}&viewPage={n_}", wait_until="domcontentloaded")
+                goto_retry(page, f"{UI_LOAN}&viewPage={n_}")
                 if page.query_selector("#member_id_tmp"):
                     raise RuntimeError("의정부 로그인에 실패했습니다 (아이디/비밀번호 확인)")
                 items, exp, pages = parse_ui_loans(page.content())
