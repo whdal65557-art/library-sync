@@ -2,8 +2,8 @@ name: 도서관 대출 동기화
 
 on:
   schedule:
-    # 도서관 이용 시간대(한국 09:00~22:59)에 30분마다. GitHub는 UTC 기준이고, 밀릴 수 있어요.
-    - cron: "7,37 0-13 * * *"
+    # 하루 한 번, 한국 시간 저녁 6시 7분(UTC 09:07). GitHub는 UTC 기준이고, 정각에는 몰려서 밀릴 수 있어 7분으로 잡았어요.
+    - cron: "7 9 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
