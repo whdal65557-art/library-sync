@@ -10,6 +10,10 @@ on:
         description: "노션에 쓰지 않고 건수만 확인 (true/false)"
         type: boolean
         default: true
+      show_titles:
+        description: "확인만 할 때 책 제목 앞 3글자와 날짜를 로그에 표시 (로그가 공개되니 확인 후 실행 기록 삭제 권장)"
+        type: boolean
+        default: false
 
 concurrency:
   group: library-sync
@@ -36,9 +40,24 @@ jobs:
           NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
           LIBRARY_ID: ${{ secrets.LIBRARY_ID }}
           LIBRARY_PW: ${{ secrets.LIBRARY_PW }}
+          EVENT: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_SHOW_TITLES: ${{ inputs.show_titles }}
+          LIVE_VAR: ${{ vars.LIVE }}
+        run: |
           # 수동 실행은 입력값을 따르고, 자동 실행은 저장소 변수 LIVE=1 일 때만 실제로 씁니다.
-          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || vars.LIVE != '1' }}
-        run: python sync_library.py
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            DRY_RUN="$INPUT_DRY_RUN"
+            SHOW_TITLES="$INPUT_SHOW_TITLES"
+          elif [ "$LIVE_VAR" = "1" ]; then
+            DRY_RUN=false
+            SHOW_TITLES=false
+          else
+            DRY_RUN=true
+            SHOW_TITLES=false
+          fi
+          export DRY_RUN SHOW_TITLES
+          python sync_library.py
 
       # 공개 저장소는 60일간 활동이 없으면 예약 실행이 멈추므로, 50일이 지나면 빈 커밋을 남겨요.
       - name: 예약 실행 유지
