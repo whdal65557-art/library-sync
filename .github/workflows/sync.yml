@@ -33,7 +33,10 @@ jobs:
         with:
           python-version: "3.12"
 
-      - run: pip install requests beautifulsoup4
+      - run: pip install requests beautifulsoup4 playwright
+
+      # 의정부 로그인은 사이트의 암호화 스크립트가 필요해서 실제 브라우저(크로미움)로 처리해요.
+      - run: python -m playwright install --with-deps chromium
 
       - name: 동기화
         env:
