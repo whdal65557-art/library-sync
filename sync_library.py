@@ -200,8 +200,20 @@ def parse_ui_loans(html):
     return items, expected, pages
 
 
-def goto_retry(page, url, tries=3):
+def probe(url):
+    """브라우저 없이 일반 요청으로 접속되는지 확인 (원인 구분용)."""
+    t = time.time()
+    try:
+        r = requests.get(url, headers=UA, timeout=20)
+        print(f"  진단: 일반 접속 응답 {r.status_code}, {time.time() - t:.1f}초, {len(r.content)}바이트")
+    except Exception as e:
+        print(f"  진단: 일반 접속도 실패 ({type(e).__name__}, {time.time() - t:.1f}초)")
+
+
+def goto_retry(page, url, tries=3, pending=None):
     """페이지 열기만 재시도한다 (로그인 제출은 계정 잠김 방지를 위해 재시도하지 않는다)."""
+    from urllib.parse import urlparse
+
     last = None
     for i in range(tries):
         try:
@@ -209,8 +221,10 @@ def goto_retry(page, url, tries=3):
             return
         except Exception as e:
             last = e
-            print(f"  의정부 접속 재시도 {i + 1}/{tries}: {type(e).__name__}")
+            hosts = sorted({urlparse(r.url).netloc for r in (pending or {})})
+            print(f"  의정부 접속 재시도 {i + 1}/{tries}: {type(e).__name__} / 응답 대기 중이던 서버: {hosts}")
             time.sleep(10)
+    probe(url)
     raise RuntimeError(f"의정부 사이트에 접속하지 못했습니다 ({tries}회 시도, {type(last).__name__})")
 
 
@@ -223,12 +237,16 @@ def fetch_uijeongbu(uid, pw):
         browser = p.chromium.launch()
         try:
             page = browser.new_context(locale="ko-KR").new_page()
-            page.set_default_timeout(60000)
+            page.set_default_timeout(40000)
+            pending = {}
+            page.on("request", lambda r: pending.__setitem__(r, time.time()))
+            page.on("requestfinished", lambda r: pending.pop(r, None))
+            page.on("requestfailed", lambda r: pending.pop(r, None))
             page.route(
                 "**/*",
                 lambda route: route.abort() if route.request.resource_type in ("image", "media", "font") else route.continue_(),
             )
-            goto_retry(page, UI_LOGIN)
+            goto_retry(page, UI_LOGIN, pending=pending)
             page.fill("#member_id_tmp", uid)
             page.fill("#member_pw_tmp", pw)
             try:
@@ -239,7 +257,7 @@ def fetch_uijeongbu(uid, pw):
             while queue:
                 n_ = queue.pop(0)
                 seen.add(n_)
-                goto_retry(page, f"{UI_LOAN}&viewPage={n_}")
+                goto_retry(page, f"{UI_LOAN}&viewPage={n_}", pending=pending)
                 if page.query_selector("#member_id_tmp"):
                     raise RuntimeError("의정부 로그인에 실패했습니다 (아이디/비밀번호 확인)")
                 items, exp, pages = parse_ui_loans(page.content())
