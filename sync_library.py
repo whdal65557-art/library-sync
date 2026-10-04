@@ -559,8 +559,14 @@ def main():
     for p in n.query_all(LIB_DB):
         lib_by_key[lib_key(plain(p["properties"][lib_title_prop]["title"]))] = p["id"]
 
+    only = [x.strip() for x in os.environ.get("SITES_ONLY", "").split(",") if x.strip()]
+    sites = [t for t in SITES if not only or any(o in t[0] for o in only)]
+    if not sites:
+        raise RuntimeError(f"SITES_ONLY 값 '{','.join(only)}'에 맞는 사이트가 없습니다")
+    print("처리할 사이트: " + ", ".join(t[0] for t in sites))
+
     failed = []
-    for site, fetcher, default_scope in SITES:
+    for site, fetcher, default_scope in sites:
         try:
             loans = fetcher(uid, pw)
         except Exception as e:  # 한 사이트가 실패해도 다른 사이트는 계속 처리
