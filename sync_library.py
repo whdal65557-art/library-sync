@@ -163,8 +163,15 @@ def fetch_yangju(uid, pw):
 
 # ---------- 의정부(가재울도서관 포함 의정부시 도서관 통합) ----------
 UI_BASE = "https://www.uilib.go.kr"
-UI_LOGIN = UI_BASE + "/gajaeul/intro/login/index.do?menu_idx=55"
-UI_LOAN = UI_BASE + "/gajaeul/intro/search/loan/index.do?menu_idx=41"
+UI_PATHS = ["science", "gajaeul"]  # 어느 도서관 사이트로 로그인해도 같은 통합 대출 목록이 나온다 (과학 먼저)
+
+
+def ui_login_url(path):
+    return f"{UI_BASE}/{path}/intro/login/index.do?menu_idx=55"
+
+
+def ui_loan_url(path):
+    return f"{UI_BASE}/{path}/intro/search/loan/index.do?menu_idx=41"
 UI_SCOPE = "의정부시도서관,정보도서관,과학도서관,미술도서관,음악도서관,영어도서관,가재울도서관,작은도서관"
 
 
@@ -227,9 +234,9 @@ def goto_retry(page, url, tries=2, pending=None):
     raise RuntimeError(f"의정부 사이트에 접속하지 못했습니다 ({tries}회 시도, {type(last).__name__})")
 
 
-def open_login(page, pending):
-    for i in range(3):
-        resp = goto_retry(page, UI_LOGIN, pending=pending)
+def open_login(page, pending, login_url):
+    for i in range(2):
+        resp = goto_retry(page, login_url, pending=pending)
         try:
             page.wait_for_selector("#member_id_tmp", timeout=20000)
             return
@@ -249,7 +256,7 @@ def open_login(page, pending):
                 )
             except Exception:
                 pass
-            print(f"  진단 {i + 1}/3: 로그인 입력창 없음 / 응답 {getattr(resp, 'status', '?')} / 제목 {title!r} / 본문 {body[:60]!r}{extra}")
+            print(f"  진단 {i + 1}/2: 로그인 입력창 없음 / 응답 {getattr(resp, 'status', '?')} / 제목 {title!r} / 본문 {body[:60]!r}{extra}")
             time.sleep(45)
     raise RuntimeError("의정부 로그인 화면이 정상으로 열리지 않았습니다")
 
@@ -277,7 +284,17 @@ def fetch_uijeongbu(uid, pw):
             page.on("request", lambda r: pending.__setitem__(r, time.time()))
             page.on("requestfinished", lambda r: pending.pop(r, None))
             page.on("requestfailed", lambda r: pending.pop(r, None))
-            open_login(page, pending)
+            base = None
+            for path in UI_PATHS:
+                try:
+                    open_login(page, pending, ui_login_url(path))
+                    base = path
+                    break
+                except RuntimeError as e:
+                    print(f"  의정부 {path} 로그인 화면을 열지 못했습니다: {e}")
+            if base is None:
+                raise RuntimeError("의정부 로그인 화면을 열지 못했습니다 (" + ", ".join(UI_PATHS) + " 모두 실패)")
+            print(f"  의정부 로그인 화면: {base}")
             page.fill("#member_id_tmp", uid)
             page.fill("#member_pw_tmp", pw)
             try:
@@ -288,7 +305,7 @@ def fetch_uijeongbu(uid, pw):
             while queue:
                 n_ = queue.pop(0)
                 seen.add(n_)
-                goto_retry(page, f"{UI_LOAN}&viewPage={n_}", pending=pending)
+                goto_retry(page, f"{ui_loan_url(base)}&viewPage={n_}", pending=pending)
                 if page.query_selector("#member_id_tmp"):
                     raise RuntimeError("의정부 로그인에 실패했습니다 (아이디/비밀번호 확인)")
                 items, exp, pages = parse_ui_loans(page.content())
