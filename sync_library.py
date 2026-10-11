@@ -261,6 +261,68 @@ def open_login(page, pending, login_url):
     raise RuntimeError("의정부 로그인 화면이 정상으로 열리지 않았습니다")
 
 
+def renew_ui(page, base, pending, enabled):
+    """반납연기가 가능한 책을 찾아서(enabled면) 연기한다. 연기 칸이 활성화된 책만 대상이다.
+
+    연기 가능한 책은 맨 왼쪽에 체크박스(rec_key_arr)나 '반납연기' 버튼(a.delay-btn)이 활성화돼 있다.
+    실패해도 대출 동기화는 계속 진행한다. 책 제목은 출력하지 않는다.
+    """
+    msgs = []
+
+    def on_dialog(d):
+        msgs.append(norm_space(d.message)[:80])
+        try:
+            d.accept()
+        except Exception:
+            pass
+
+    page.on("dialog", on_dialog)
+    found = tried = 0
+    try:
+        queue, seen = [1], set()
+        while queue and len(seen) < 30:
+            n_ = queue.pop(0)
+            seen.add(n_)
+            prev = None
+            for attempt in range(10):
+                goto_retry(page, f"{ui_loan_url(base)}&viewPage={n_}", pending=pending)
+                if attempt == 0:
+                    _, _, pages = parse_ui_loans(page.content())
+                    queue += sorted(x for x in pages if x not in seen and x not in queue)
+                boxes = page.query_selector_all("input[name=rec_key_arr]:not([disabled])")
+                btns = page.query_selector_all("a.delay-btn")
+                cnt = len(boxes) or len(btns)
+                if attempt == 0:
+                    found += cnt
+                if cnt == 0 or not enabled or (prev is not None and cnt >= prev):
+                    break  # 없음 / 확인만 하는 모드 / 눌러도 줄지 않음(무한 반복 방지)
+                prev = cnt
+                if boxes:
+                    for b in boxes:
+                        b.check()
+                    tried += len(boxes)
+                    page.click("a.checkDelay")
+                else:
+                    tried += 1
+                    btns[0].click()
+                page.wait_for_timeout(3000)
+    except Exception as e:
+        print(f"  의정부 반납연기 처리 중 오류 (대출 동기화는 계속합니다): {type(e).__name__}: {str(e)[:120]}")
+    finally:
+        try:
+            page.remove_listener("dialog", on_dialog)
+        except Exception:
+            pass
+    if found == 0:
+        print("  의정부 반납연기: 연기할 수 있는 책이 없습니다")
+    elif not enabled:
+        print(f"  의정부 반납연기: 연기 가능한 책 {found}건 (RENEW=true 이고 DRY_RUN=false 일 때 실제로 연기합니다)")
+    else:
+        print(f"  의정부 반납연기: 가능 {found}건 중 연기 요청 {tried}건")
+    if msgs:
+        print("  의정부 안내 메시지: " + " / ".join(dict.fromkeys(msgs)))
+
+
 def fetch_uijeongbu(uid, pw):
     # 사이트가 아이디/비밀번호를 자바스크립트로 암호화해서 보내므로, 실제 브라우저로 사이트의 로그인 함수를 그대로 쓴다.
     from playwright.sync_api import sync_playwright
@@ -302,6 +364,12 @@ def fetch_uijeongbu(uid, pw):
                     page.evaluate("doLoginSubmit()")
             except Exception:
                 raise RuntimeError("의정부 로그인 응답이 없습니다 (아이디/비밀번호 또는 사이트 상태 확인)")
+            # 대출 기록을 읽기 전에 반납연기를 먼저 처리해야, 바뀐 반납예정일이 같은 실행에서 노션에 반영된다.
+            renew_on = (
+                os.environ.get("RENEW", "false").lower() == "true"
+                and os.environ.get("DRY_RUN", "true").lower() != "true"
+            )
+            renew_ui(page, base, pending, renew_on)
             while queue:
                 n_ = queue.pop(0)
                 seen.add(n_)
@@ -396,11 +464,27 @@ def days_apart(a, b):
     return abs((date.fromisoformat(a) - date.fromisoformat(b)).days)
 
 
-def pick_page(ln, pages, used):
+def pick_page(ln, pages, used, lib_id=None):
     """같은 책의 기존 기록을 고른다. (페이지, 종류) 반환.
     종류: same(같은 대출) / fix(날짜가 며칠 어긋난 직접 입력) / convert(예약->대출) / reuse(재대출)
+          takeover(다른 도서관에서 대출 중인 같은 책 기록을 더 늦게 빌린 이 대출로 넘겨받음)
+          skip(다른 도서관의 더 늦은(또는 같은 날) 대출이 이미 기록돼 있어 이 대출은 건드리지 않음)
+    책 이름은 기록 하나만 쓰는 방식이라, 두 도서관에서 같은 책을 동시에 빌리면 더 늦게 빌린 쪽을 기록한다.
     """
-    cands = [p for p in pages if p["id"] not in used and title_match(ln["title"], p["title"])]
+    allc = [p for p in pages if p["id"] not in used and title_match(ln["title"], p["title"])]
+    if not allc:
+        return None, None
+    # 이미 대출 중인데 '다른 도서관'으로 기록된 페이지는 이 대출의 기록이 아닐 수 있다.
+    foreign = [
+        p for p in allc
+        if lib_id and p["libs"] and lib_id not in p["libs"] and p["status"] in S_ACTIVE
+    ]
+    cands = [p for p in allc if p not in foreign]
+    if not cands and foreign:
+        f = max(foreign, key=lambda p: p["start"] or "")
+        if f["start"] and ln["start"] > f["start"]:
+            return f, "takeover"
+        return f, "skip"
     if not cands:
         return None, None
     for p in cands:
@@ -426,11 +510,11 @@ def pick_page(ln, pages, used):
 
 def make_plan(loans, pages, lib_by_key, scope_ids):
     used, plan = set(), []
-    stats = {"create": 0, "convert": 0, "reuse": 0, "fix": 0, "return": 0, "same": 0}
+    stats = {"create": 0, "convert": 0, "reuse": 0, "fix": 0, "return": 0, "same": 0, "takeover": 0, "skip": 0}
 
     for ln in loans:
         lib_id = lib_by_key.get(lib_key(ln["library"]))
-        page, kind = pick_page(ln, pages, used)
+        page, kind = pick_page(ln, pages, used, lib_id)
 
         if page is None:
             plan.append(("create", None, {"title": ln["title"], "status": S_LOANING, "period": (ln["start"], ln["end"]), "lib": lib_id}, {"type": "create", "site": ln["title"]}))
@@ -438,7 +522,9 @@ def make_plan(loans, pages, lib_by_key, scope_ids):
             continue
 
         used.add(page["id"])
-        if kind == "same":
+        if kind == "skip":
+            stats["skip"] += 1
+        elif kind == "same":
             props = {}
             if page["end"] != ln["end"]:
                 props["period"] = (ln["start"], ln["end"])
@@ -455,7 +541,7 @@ def make_plan(loans, pages, lib_by_key, scope_ids):
                 props["lib"] = lib_id
             plan.append(("update", page["id"], props, {"type": kind, "site": ln["title"], "notion": page["title"], "old": (page["status"], page["start"], page["end"]), "new": props.get("period")}))
             stats["fix"] += 1
-        else:  # convert / reuse: 대출중으로 바꾸고 기간과 도서관을 새 대출에 맞춘다
+        else:  # convert / reuse / takeover: 대출중으로 바꾸고 기간과 도서관을 새 대출에 맞춘다
             props = {"status": S_LOANING, "period": (ln["start"], ln["end"])}
             if lib_id:
                 props["lib"] = lib_id
@@ -560,6 +646,9 @@ def main():
         lib_by_key[lib_key(plain(p["properties"][lib_title_prop]["title"]))] = p["id"]
 
     only = [x.strip() for x in os.environ.get("SITES_ONLY", "").split(",") if x.strip()]
+    # .bat 파일에서 한글이 깨지지 않도록 영문 별칭도 허용
+    alias = {"uijeongbu": "가재울", "gajaeul": "가재울", "yangju": "덕계", "dukgye": "덕계"}
+    only = [alias.get(x.lower(), x) for x in only]
     sites = [t for t in SITES if not only or any(o in t[0] for o in only)]
     if not sites:
         raise RuntimeError(f"SITES_ONLY 값 '{','.join(only)}'에 맞는 사이트가 없습니다")
@@ -586,6 +675,8 @@ def main():
         print(
             f"[{site}] 계획: 새로 만듦 {st['create']}, 예약→대출중 {st['convert']}, 기존 기록 재사용(반납완료 등→대출중) {st['reuse']}, "
             f"날짜/도서관 갱신 {st['fix']}, 반납완료 {st['return']}, 변경 없음 {st['same']}"
+            + (f", 다른 도서관 기록 넘겨받음 {st['takeover']}" if st["takeover"] else "")
+            + (f", 다른 도서관의 더 늦은 대출 기록이 있어 건너뜀 {st['skip']}" if st["skip"] else "")
         )
 
         if dry:
