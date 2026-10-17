@@ -137,8 +137,16 @@ def fetch_loans(session):
         r.raise_for_status()
         if 'name="loginForm"' in r.text or "통합로그인" in r.text:
             raise RuntimeError("로그인에 실패했습니다 (아이디/비밀번호 확인)")
-        if "대출현황" not in r.text or "article-list" not in r.text:
-            raise RuntimeError("대출현황 화면 구조가 바뀌었습니다")
+        if "대출현황" not in r.text:
+            raise RuntimeError("대출현황 화면 구조가 바뀌었습니다 (대출현황 글자 없음)")
+        if "article-list" not in r.text:
+            # 대출 중인 책이 없으면 목록이 없을 수 있다. '없습니다' 같은 안내 문구가 있을 때만 0건으로 인정한다.
+            if page == 1 and re.search(r"(대출|내역|자료|도서)[^<>]{0,20}없습니다", r.text):
+                break
+            raise RuntimeError(
+                "대출현황 화면 구조가 바뀌었습니다 "
+                f"(목록 없음, 0건 안내 문구 없음, 글자 수 {len(BeautifulSoup(r.text, 'html.parser').get_text())})"
+            )
         loans += parse_loans(r.text)
         nums = {int(n) for n in re.findall(r"fnList\((\d+)\)", r.text)}
         nxt = sorted(n for n in nums if n not in seen_pages)
@@ -180,9 +188,19 @@ def parse_ui_loans(html):
     soup = BeautifulSoup(html, "html.parser")
     summary = soup.select_one("table.loanTbl td.td1")
     table = soup.select_one("table.default-tbl")
-    if summary is None or table is None:
-        raise RuntimeError("의정부 대출현황 화면 구조가 바뀌었습니다")
+    if summary is None:
+        # 구조 판단에 쓴 흔적만 남긴다 (책 제목은 출력하지 않음)
+        title = norm_space(soup.title.get_text()) if soup.title else "?"
+        raise RuntimeError(
+            f"의정부 대출현황 화면 구조가 바뀌었습니다 (제목 {title[:40]!r}, 요약표 없음, "
+            f"대출표 {'있음' if table is not None else '없음'}, 로그인창 {'있음' if soup.select_one('#member_id_tmp') else '없음'}, "
+            f"글자 수 {len(soup.get_text())})"
+        )
     expected = int(re.sub(r"\D", "", summary.get_text()) or 0)
+    if table is None:
+        if expected == 0:
+            return [], 0, set()  # 대출 중인 책이 없으면 표가 아예 없을 수 있다
+        raise RuntimeError(f"의정부 대출현황에 대출 {expected}건이 표시되는데 목록 표를 찾지 못했습니다 (화면 구조 변경 가능성)")
     items = []
     for tr in table.select("tbody tr"):
         cells = {c: tr.select_one(f"td.{c}") for c in ("td3", "td5", "td6", "td7")}
