@@ -28,6 +28,7 @@ LIB_DB = "1c4edb4744028051a183c54632991fb6"
 P_STATUS = "상태"
 P_PERIOD = "대출 기간"
 P_LIB = "빌린 도서관"
+P_RESERVED = "예약됨"  # 체크박스. 양주 대출현황에 '(예약중)'이 있으면 체크한다 (다른 사람이 예약해서 재대출 불가)
 
 S_ACTIVE = {"대출중", "연체 중"}
 S_RESERVED = {"예약완료", "담아두기"}
@@ -98,12 +99,14 @@ def parse_loans(html):
         end = re.search(r"반납예정일\s*:\s*(\d{4}\.\d{2}\.\d{2})", text)
         if not (start and end):
             raise RuntimeError("대출 항목 형식이 예상과 다릅니다 (사이트 개편 가능성)")
+        st = li.select_one("span.status")  # 책 제목에 '예약'이 들어 있어도 헷갈리지 않게 상태 칸만 본다
         items.append(
             {
                 "title": norm_space(t.get_text()),
                 "library": lib.group(1) if lib else "",
                 "start": to_iso(start.group(1)),
                 "end": to_iso(end.group(1)),
+                "reserved": ("예약중" in st.get_text()) if st is not None else False,
             }
         )
     return items
@@ -279,10 +282,11 @@ def open_login(page, pending, login_url):
     raise RuntimeError("의정부 로그인 화면이 정상으로 열리지 않았습니다")
 
 
-def renew_ui(page, base, pending, enabled):
+def renew_ui(page, base, pending, enabled, limit=None):
     """반납연기가 가능한 책을 찾아서(enabled면) 연기한다. 연기 칸이 활성화된 책만 대상이다.
 
     연기 가능한 책은 맨 왼쪽에 체크박스(rec_key_arr)나 '반납연기' 버튼(a.delay-btn)이 활성화돼 있다.
+    limit: 한 번 실행에서 연기할 최대 권수 (시험용 안전장치, None이면 제한 없음).
     실패해도 대출 동기화는 계속 진행한다. 책 제목은 출력하지 않는다.
     """
     msgs = []
@@ -314,11 +318,14 @@ def renew_ui(page, base, pending, enabled):
                     found += cnt
                 if cnt == 0 or not enabled or (prev is not None and cnt >= prev):
                     break  # 없음 / 확인만 하는 모드 / 눌러도 줄지 않음(무한 반복 방지)
+                if limit is not None and tried >= limit:
+                    break  # 시험용 안전장치: 정한 권수만 연기
                 prev = cnt
                 if boxes:
-                    for b in boxes:
+                    pick = boxes if limit is None else boxes[: limit - tried]
+                    for b in pick:
                         b.check()
-                    tried += len(boxes)
+                    tried += len(pick)
                     page.click("a.checkDelay")
                 else:
                     tried += 1
@@ -336,7 +343,7 @@ def renew_ui(page, base, pending, enabled):
     elif not enabled:
         print(f"  의정부 반납연기: 연기 가능한 책 {found}건 (RENEW=true 이고 DRY_RUN=false 일 때 실제로 연기합니다)")
     else:
-        print(f"  의정부 반납연기: 가능 {found}건 중 연기 요청 {tried}건")
+        print(f"  의정부 반납연기: 가능 {found}건 중 연기 요청 {tried}건" + (f" (한 번에 최대 {limit}건으로 제한)" if limit is not None else ""))
     if msgs:
         print("  의정부 안내 메시지: " + " / ".join(dict.fromkeys(msgs)))
 
@@ -387,7 +394,8 @@ def fetch_uijeongbu(uid, pw):
                 os.environ.get("RENEW", "false").lower() == "true"
                 and os.environ.get("DRY_RUN", "true").lower() != "true"
             )
-            renew_ui(page, base, pending, renew_on)
+            lim = os.environ.get("RENEW_MAX", "").strip()
+            renew_ui(page, base, pending, renew_on, int(lim) if lim.isdigit() else None)
             while queue:
                 n_ = queue.pop(0)
                 seen.add(n_)
@@ -470,6 +478,8 @@ def read_loan_pages(raw, title_prop):
                 "start": (per.get("start") or "")[:10] or None,
                 "end": (per.get("end") or "")[:10] or None,
                 "libs": [x["id"] for x in (pr.get(P_LIB) or {}).get("relation", [])],
+                # 체크박스 속성이 없으면 None (그러면 예약 표시는 건너뛴다)
+                "reserved": (pr.get(P_RESERVED) or {}).get("checkbox") if (pr.get(P_RESERVED) or {}).get("type") == "checkbox" else None,
             }
         )
     return pages
@@ -526,16 +536,28 @@ def pick_page(ln, pages, used, lib_id=None):
     return None, None
 
 
+def resv_change(ln, page):
+    """예약됨 체크를 바꿔야 하면 새 값(True/False), 아니면 None. 양주 대출(예약 정보가 있는 대출)만 대상이다."""
+    rv = ln.get("reserved")
+    if rv is None or page.get("reserved") is None:
+        return None
+    return rv if page["reserved"] != rv else None
+
+
 def make_plan(loans, pages, lib_by_key, scope_ids):
     used, plan = set(), []
-    stats = {"create": 0, "convert": 0, "reuse": 0, "fix": 0, "return": 0, "same": 0, "takeover": 0, "skip": 0}
+    stats = {"create": 0, "convert": 0, "reuse": 0, "fix": 0, "return": 0, "same": 0, "takeover": 0, "skip": 0, "resv": 0}
 
     for ln in loans:
         lib_id = lib_by_key.get(lib_key(ln["library"]))
         page, kind = pick_page(ln, pages, used, lib_id)
 
         if page is None:
-            plan.append(("create", None, {"title": ln["title"], "status": S_LOANING, "period": (ln["start"], ln["end"]), "lib": lib_id}, {"type": "create", "site": ln["title"]}))
+            props = {"title": ln["title"], "status": S_LOANING, "period": (ln["start"], ln["end"]), "lib": lib_id}
+            if ln.get("reserved"):
+                props["reserved"] = True
+                stats["resv"] += 1
+            plan.append(("create", None, props, {"type": "create", "site": ln["title"]}))
             stats["create"] += 1
             continue
 
@@ -548,21 +570,35 @@ def make_plan(loans, pages, lib_by_key, scope_ids):
                 props["period"] = (ln["start"], ln["end"])
             if lib_id and not page["libs"]:
                 props["lib"] = lib_id
+            other = bool(props)
+            ch = resv_change(ln, page)
+            if ch is not None:
+                props["reserved"] = ch
+                stats["resv"] += 1
             if props:
                 plan.append(("update", page["id"], props, {"type": kind, "site": ln["title"], "notion": page["title"], "old": (page["status"], page["start"], page["end"]), "new": props.get("period")}))
+            if other:
                 stats["fix"] += 1
-            else:
+            elif not props:
                 stats["same"] += 1
         elif kind == "fix":
             props = {"period": (ln["start"], ln["end"])}
             if lib_id and not page["libs"]:
                 props["lib"] = lib_id
+            ch = resv_change(ln, page)
+            if ch is not None:
+                props["reserved"] = ch
+                stats["resv"] += 1
             plan.append(("update", page["id"], props, {"type": kind, "site": ln["title"], "notion": page["title"], "old": (page["status"], page["start"], page["end"]), "new": props.get("period")}))
             stats["fix"] += 1
         else:  # convert / reuse / takeover: 대출중으로 바꾸고 기간과 도서관을 새 대출에 맞춘다
             props = {"status": S_LOANING, "period": (ln["start"], ln["end"])}
             if lib_id:
                 props["lib"] = lib_id
+            ch = resv_change(ln, page)
+            if ch is not None:
+                props["reserved"] = ch
+                stats["resv"] += 1
             plan.append(("update", page["id"], props, {"type": kind, "site": ln["title"], "notion": page["title"], "old": (page["status"], page["start"], page["end"]), "new": props.get("period")}))
             stats[kind] += 1
 
@@ -570,7 +606,10 @@ def make_plan(loans, pages, lib_by_key, scope_ids):
         if p["id"] in used or p["status"] not in S_ACTIVE or not p["libs"]:
             continue
         if all(l in scope_ids for l in p["libs"]):
-            plan.append(("update", p["id"], {"status": S_RETURNED}, {"type": "return", "notion": p["title"], "old": (p["status"], p["start"], p["end"]), "new": None}))
+            ret = {"status": S_RETURNED}
+            if p.get("reserved"):
+                ret["reserved"] = False  # 반납했으니 '예약됨' 표시도 지운다
+            plan.append(("update", p["id"], ret, {"type": "return", "notion": p["title"], "old": (p["status"], p["start"], p["end"]), "new": None}))
             stats["return"] += 1
     return plan, stats
 
@@ -587,6 +626,8 @@ def build_props(props, schema, title_prop):
         out[P_PERIOD] = {"date": {"start": s, "end": e}}
     if props.get("lib"):
         out[P_LIB] = {"relation": [{"id": props["lib"]}]}
+    if "reserved" in props and (schema.get(P_RESERVED) or {}).get("type") == "checkbox":
+        out[P_RESERVED] = {"checkbox": bool(props["reserved"])}
     return out
 
 
@@ -656,6 +697,8 @@ def main():
     for name in (P_STATUS, P_PERIOD, P_LIB):
         if name not in loan_schema:
             raise RuntimeError(f"대출 기록 DB에 '{name}' 속성이 없습니다")
+    if (loan_schema.get(P_RESERVED) or {}).get("type") != "checkbox":
+        print(f"참고: 대출 기록 DB에 '{P_RESERVED}' 체크박스 속성이 없어 예약 표시는 건너뜁니다")
     title_prop = next(k for k, v in loan_schema.items() if v["type"] == "title")
     lib_title_prop = next(k for k, v in get_schema(n, LIB_DB).items() if v["type"] == "title")
 
@@ -695,6 +738,7 @@ def main():
             f"날짜/도서관 갱신 {st['fix']}, 반납완료 {st['return']}, 변경 없음 {st['same']}"
             + (f", 다른 도서관 기록 넘겨받음 {st['takeover']}" if st["takeover"] else "")
             + (f", 다른 도서관의 더 늦은 대출 기록이 있어 건너뜀 {st['skip']}" if st["skip"] else "")
+            + (f", 예약됨 표시 갱신 {st['resv']}" if st["resv"] else "")
         )
 
         if dry:
